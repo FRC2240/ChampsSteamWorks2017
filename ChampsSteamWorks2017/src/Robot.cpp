@@ -18,9 +18,9 @@ private:
 	bool isRobotCentric = false;
 	double last_world_linear_accel_x = 0.0;
 	double last_world_linear_accel_y = 0.0;
-	TalonSRX *flooper;
 	const std::string autoNameDefault = "center";
 	std::string autoSelected;
+	bool lastButton6;
 
 	// Servo constants
 	const double kServoRightOpen   = 0.3; //0.5;
@@ -74,7 +74,8 @@ private:
 		kPlacingGear,
 		kDrivingBackward,
 		kTurningToGear,
-		kDrivingToGear
+		kDrivingToGear,
+		kAutoReleaseGear
 	} autoState = kDoNothing;
 
 	PixyTracker *m_pixy;
@@ -86,6 +87,7 @@ private:
 	TalonSRX   *lBackMotor;
 	TalonSRX   *rFrontMotor;
 	TalonSRX   *rBackMotor;
+	CANTalon   *flooper;
 	Joystick   *stick;
 	AHRS       *ahrs; // navX MXP
 
@@ -236,6 +238,38 @@ private:
 	void autoDoNothing() {
 		drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, ahrs->GetAngle()); //stop
 	}
+	
+	void autoReleaseGear() {
+		autoTimer++;
+
+		if (autoTimer == 1) {
+			double targetPositionRotations = 25.0;
+			flooper->SetControlMode(CANSpeedController::kPosition);
+			flooper->Set(targetPositionRotations);
+		} else if (autoTimer < 30) {
+			turnController->SetSetpoint(driveAngle);
+			turnController->Enable();
+			drive->MecanumDrive_Cartesian(-0.025, kAutoSpeed, -turnPIDOutput.correction, 0.0);
+		} else {
+			autoTimer = 0;
+			autoState = kDoNothing;
+		}			
+	}
+
+	double unwrapGyroAngle(double driveAngle) {
+		double rotations = floor(abs(driveAngle)/360.0);
+		if (driveAngle < 0.0) {
+			driveAngle+= rotations*360.0;
+		} else {
+			driveAngle-= rotations*360.0;
+		}
+		if (driveAngle > 180.0) {
+			driveAngle-=360.0;
+		} else if (driveAngle < -180.0) {
+			driveAngle+=360.0;
+		}
+		return driveAngle;
+	}
 
 	void RobotInit()
 	{
@@ -247,7 +281,7 @@ private:
 		lBackMotor	 = new TalonSRX(8); // 1
 		rFrontMotor  = new TalonSRX(1); // 8
 		rBackMotor	 = new TalonSRX(9); // 0
-		flooper = new TalonSRX(4);
+		flooper      = new CANTalon(0);
 		rFrontMotor->SetInverted(true);
 		rBackMotor->SetInverted(true);
 
@@ -273,7 +307,32 @@ private:
 		strafeController->SetOutputRange(-kStrafeOutputRange, kStrafeOutputRange);
 		strafeController->SetAbsoluteTolerance(kToleranceStrafe);
 		strafeController->SetContinuous(true);
+		
+		int absolutePosition = flooper->GetPulseWidthPosition() & 0xFFF; /* mask out the bottom12 bits, we don't care about the wrap arounds */
+		/* use the low level API to set the quad encoder signal */
+		flooper->SetEncPosition(absolutePosition);
 
+		/* choose the sensor and sensor direction */
+		flooper->SetFeedbackDevice(CANTalon::CtreMagEncoder_Relative);
+		flooper->SetSensorDirection(false);
+		//_talon->ConfigEncoderCodesPerRev(XXX), // if using FeedbackDevice.QuadEncoder
+		//_talon->ConfigPotentiometerTurns(XXX), // if using FeedbackDevice.AnalogEncoder or AnalogPot
+
+		/* set the peak and nominal outputs, 12V means full */
+		flooper->ConfigNominalOutputVoltage(+0., -0.);
+		flooper->ConfigPeakOutputVoltage(+12., -12.);
+		/* set the allowable closed-loop error,
+		 * Closed-Loop output will be neutral within this range.
+		 * See Table in Section 17.2.1 for native units per rotation.
+		 */
+		flooper->SetAllowableClosedLoopErr(0); /* always servo */
+		/* set closed loop gains in slot0 */
+		flooper->SelectProfileSlot(0);
+		flooper->SetF(0.0);
+		flooper->SetP(0.1);
+		flooper->SetI(0.0);
+		flooper->SetD(0.0);
+		
 		// Create the Pixy instance and start streaming the frames
 		m_pixy = new PixyTracker();
 		m_pixy->startVideo();
@@ -338,15 +397,28 @@ private:
 	}
 
 	void TeleopPeriodic() {
-		if (stick -> GetRawButton(6)) {
+		bool button6 = stick->GetRawButton(6);
+		
+		if (button6) {
 			gearServoRight -> Set(kServoRightOpen);
 			gearServoLeft -> Set(kServoLeftOpen);
-
-		} else {
+		} else if (!button6 && lastButton6){
+			autoState = kAutoReleaseGear;
+			autoTimer = 0;
+			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+			//gearServoRight -> Set(kServoRightClosed);
+			//gearServoLeft -> Set(kServoLeftClosed);
+		}
+		lastButton6 = button6;
+		if (autoState == kAutoReleaseGear) {
+			autoReleaseGear();
+			return;
+		}
+		if (!button6) {
 			gearServoRight -> Set(kServoRightClosed);
 			gearServoLeft -> Set(kServoLeftClosed);
 		}
-
+		
 		if (stick->GetRawAxis(2)){
 			climber -> Set(1.0);
 		} else{
@@ -395,8 +467,8 @@ private:
 
 				isRobotCentric = true;
 
-				driveAngle = ahrs->GetAngle();
-				double rotations = floor(abs(driveAngle)/360.0);
+				driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+				/*double rotations = floor(abs(driveAngle)/360.0);
 				if (driveAngle < 0.0) {
 					driveAngle+= rotations*360.0;
 				} else {
@@ -406,7 +478,7 @@ private:
 					driveAngle-=360.0;
 				} else if (driveAngle < -180.0) {
 					driveAngle+=360.0;
-				}
+				}*/
 			}
 		} else {
 			isRobotCentric = false;

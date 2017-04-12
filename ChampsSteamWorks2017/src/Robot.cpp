@@ -16,9 +16,9 @@ private:
 	TalonSRX *climber;
 	double driveAngle;
 	bool isRobotCentric = false;
-    double last_world_linear_accel_x = 0.0;
-    double last_world_linear_accel_y = 0.0;
-
+	double last_world_linear_accel_x = 0.0;
+	double last_world_linear_accel_y = 0.0;
+	TalonSRX *flooper;
 	const std::string autoNameDefault = "center";
 	std::string autoSelected;
 
@@ -39,22 +39,23 @@ private:
 	// Tunable parameters for driving
 	const double kSpinRateLimiter = 0.5;
 
-    int autoDriveFowardTime    = 0;
+	int autoDriveFowardTime    = 0;
 	double autoTurnToGearAngle = 0.0;
 
 	// Tunable parameters for autonomous
-	const double kAutoSpeed               = 0.5;
-    const double kCollisionThresholdDelta = 0.5;
-    const int kTurningToGearTime          = 80;
-    const int kDriveToGearMaxTime         = 600;
-    const int kPlaceGearTime              = 50;
-    const int kDriveBackwardTime          = 50;
+	const double kAutoSpeed               = 0.4;
+	const double kCollisionThresholdDelta = 0.15;
+	const int kTurningToGearTime          = 70;
+	const int kDriveToGearMaxTime         = 200;
+	const int kPlaceGearTime              = 50;
+	const int kDriveBackwardTime          = 50;
+	const double kStrafeOutputRange       = 0.2;
 
 	// Tunable parameters for the Strafe PID Controller
-	const double ksP = 0.01;
-	const double ksI = 0.00;
-	const double ksD = 0.03;
-	const double ksF = 0.00;
+	const double ksP = 0.02;
+	const double ksI = 0.0;
+	const double ksD = 0.06;
+	const double ksF = 0.0;
 
 	// Tunable parameters for the Turn PID Controller
 	const double kP = 0.01;
@@ -65,7 +66,7 @@ private:
 	/* This tuning parameter indicates how close to "on target" the    */
 	/* PID Controller will attempt to get.                             */
 	const double kToleranceDegrees = 1.0;
-	const double kToleranceStrafe = 2.0;
+	const double kToleranceStrafe = 0.01;
 
 	enum AutoState {
 		kDoNothing,
@@ -94,7 +95,7 @@ private:
 	// Output from the Turn (Angle) PID Controller
 	class TurnPIDOutput : public PIDOutput {
 	public:
-		double correction;
+		double correction = 0.0;
 		void PIDWrite(double output) {
 			correction = output;
 		}
@@ -103,7 +104,7 @@ private:
 	// Output from the Strafe PID Controller
 	class StrafePIDOutput : public PIDOutput {
 	public:
-		double correction;
+		double correction = 0.0;
 		void PIDWrite(double output) {
 			correction = output;
 		}
@@ -117,20 +118,17 @@ private:
 			return offset;
 		}
 		void calcTargetOffset(PixyTracker::Target* targets, int count) {
-			if (count < 2) {
-				offset = 0.0;
-			} else {
-                //if ((targets[0].block.width > kGearTargetWidth)   &&
-				//	(targets[0].block.height > kGearTargetHeight) &&
- 				//	(targets[1].block.width > kGearTargetWidth)   &&
- 				//	(targets[1].block.height > kGearTargetHeight) &&
- 				//	(abs(targets[0].block.y - targets[1].block.y)) < 10) {
-                //}
-
-				offset = (targets[0].block.x + targets[1].block.x)/2.0 - 160.0;
+			offset = 0.0;
+			if (count >= 2) {
+				scale = 8.25/(abs(targets[0].block.x - targets[1].block.x));
+				pixelOffset = (targets[0].block.x + targets[1].block.x)/2.0 - 160.0;
+				offset = scale*pixelOffset;
+				// std::cout << "OFFSET = " << offset << std::endl;
 			}
 		}
 	private:
+		double scale;
+		double pixelOffset;
 		double offset;
 	} strafePIDSource;
 
@@ -149,13 +147,13 @@ private:
 		if (autoTimer < autoDriveFowardTime) {
 			turnController->SetSetpoint(0.0);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(0.0, -kAutoSpeed, -turnPIDOutput.correction, ahrs->GetAngle());
+			drive->MecanumDrive_Cartesian(0.035, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
 		} else {
-            autoTimer = 0;
-            autoState = kTurningToGear;
+			autoTimer = 0;
+			autoState = kTurningToGear;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
-        }
-    }
+		}
+	}
 
 	void autoTurningToGear() {
 		autoTimer++;
@@ -165,48 +163,50 @@ private:
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction * 0.5, ahrs->GetAngle());
 		} else {
-            autoTimer = 0;
-            autoState = kDrivingToGear;
+			autoTimer = 0;
+			autoState = kDrivingToGear;
+			driveAngle = ahrs->GetAngle();
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
-        }
-    }
+		}
+	}
 
-    void autoDrivingToGear() {
+	void autoDrivingToGear() {
 		autoTimer++;
 
 		if (autoTimer < kDriveToGearMaxTime)
 		{
-			turnController->SetSetpoint(0.0);
+			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 			strafeController->SetSetpoint(0.0);
 			strafeController->Enable();
 
-            // Get targets from Pixy and calculate the offset from center
-  		    int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
-  		    strafePIDSource.calcTargetOffset(m_targets, count);
+			// Get targets from Pixy and calculate the offset from center
+			int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
+			strafePIDSource.calcTargetOffset(m_targets, count);
 
-			drive->MecanumDrive_Cartesian(strafePIDOutput.correction, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(/*0.025*/-strafePIDOutput.correction, -0.32, -turnPIDOutput.correction, 0.0);
+			// std::cout << "CORR = " << strafePIDOutput.correction << "  ";
 
-            double curr_world_linear_accel_x = ahrs->GetWorldLinearAccelX();
-            double currentJerkX = curr_world_linear_accel_x - last_world_linear_accel_x;
-            last_world_linear_accel_x = curr_world_linear_accel_x;
-            double curr_world_linear_accel_y = ahrs->GetWorldLinearAccelY();
-            double currentJerkY = curr_world_linear_accel_y - last_world_linear_accel_y;
-            last_world_linear_accel_y = curr_world_linear_accel_y;
+			double curr_world_linear_accel_x = ahrs->GetWorldLinearAccelX();
+			double currentJerkX = curr_world_linear_accel_x - last_world_linear_accel_x;
+			last_world_linear_accel_x = curr_world_linear_accel_x;
+			double curr_world_linear_accel_y = ahrs->GetWorldLinearAccelY();
+			double currentJerkY = curr_world_linear_accel_y - last_world_linear_accel_y;
+			last_world_linear_accel_y = curr_world_linear_accel_y;
 
-            // Hit the wall!
-            if ((abs(currentJerkX) > kCollisionThresholdDelta) || (abs(currentJerkY) > kCollisionThresholdDelta)) {
-                autoTimer = 0;
-                autoState = kPlacingGear;
-			    drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
-            }
+			// Hit the wall!
+			if ((abs(currentJerkX) > kCollisionThresholdDelta) || (abs(currentJerkY) > kCollisionThresholdDelta)) {
+				autoTimer = 0;
+				autoState = kPlacingGear;
+				drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
+			}
 
 		} else {
-            autoTimer = 0;
-            autoState = kDoNothing;
+			autoTimer = 0;
+			autoState = kDoNothing;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
-        }
-    }
+		}
+	}
 
 	void autoPlacingGear() {
 		autoTimer++;
@@ -224,9 +224,9 @@ private:
 		autoTimer++;
 		if (autoTimer < kDriveBackwardTime)
 		{
-			turnController->SetSetpoint(0.0);
+			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(0.0, kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(-0.025, kAutoSpeed, -turnPIDOutput.correction, 0.0);
 		} else {
 			autoTimer = 0;
 			autoState = kDoNothing;
@@ -239,15 +239,15 @@ private:
 
 	void RobotInit()
 	{
-		gearServoRight = new Servo(5); //right servo on practice bot
-		gearServoLeft = new Servo(3); //left is 3 on practice bot
+		gearServoRight = new Servo(5);
+		gearServoLeft = new Servo(3);
 		climber = new TalonSRX(7);
 		stick        = new Joystick(0);
 		lFrontMotor  = new TalonSRX(0); // 9
 		lBackMotor	 = new TalonSRX(8); // 1
 		rFrontMotor  = new TalonSRX(1); // 8
 		rBackMotor	 = new TalonSRX(9); // 0
-
+		flooper = new TalonSRX(4);
 		rFrontMotor->SetInverted(true);
 		rBackMotor->SetInverted(true);
 
@@ -270,7 +270,7 @@ private:
 
 		strafeController = new PIDController(ksP, ksI, ksD, ksF, &strafePIDSource, &strafePIDOutput);
 		strafeController->SetInputRange(-100.0, 100.0);
-		strafeController->SetOutputRange(-0.1, 0.1);
+		strafeController->SetOutputRange(-kStrafeOutputRange, kStrafeOutputRange);
 		strafeController->SetAbsoluteTolerance(kToleranceStrafe);
 		strafeController->SetContinuous(true);
 
@@ -287,23 +287,22 @@ private:
 		autoSelected = SmartDashboard::GetString("Auto Selector", autoNameDefault);
 		std::cout << "Auto selected: " << autoSelected << std::endl;
 
-		if (autoSelected.find("r") != std::string::npos) {
+		if (autoSelected.find("R") != std::string::npos) {
 			std::cout << "right\n";
-            autoDriveFowardTime = 50;
+			autoDriveFowardTime = 120;
 			autoTurnToGearAngle = -60.0;
-		} else if (autoSelected.find("l") != std::string::npos){
+		} else if (autoSelected.find("L") != std::string::npos){
 			std::cout << "left\n";
-            autoDriveFowardTime = 50;
+			autoDriveFowardTime = 170;
 			autoTurnToGearAngle = 60.0;
 		} else {
 			std::cout << "center\n";
-            autoDriveFowardTime = 0;
-			autoTurnToGearAngle = 0.0;
+			driveAngle = 0.0;
+			autoState = kDrivingToGear;
 		}
 
 		autoTimer = 0;
 	}
-
 
 	void DisabledInit() {
 		drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
@@ -354,6 +353,14 @@ private:
 			climber -> Set(0.0);
 		}
 
+		if (stick -> GetRawButton(4)){
+			flooper ->Set(-.2);
+		} else if(stick -> GetRawButton(3)){
+			flooper -> Set(.2);
+		}
+		else {
+			flooper -> Set(0.0);
+		}
 		// Check for drive-mode toggle
 		/*
 		if (stick->GetRawButton(1)) {
@@ -412,27 +419,25 @@ private:
 
 			if (stick->GetRawButton(2)) {
 				drive->MecanumDrive_Cartesian(
-								deadBand(0.0),
-								deadBand(stick->GetRawAxis(1)),
-								-turnPIDOutput.correction,
-								0.0);
-								//ahrs->GetAngle());
+						deadBand(0.0),
+						deadBand(stick->GetRawAxis(1)),
+						-turnPIDOutput.correction,
+						0.0);
 			} else {
-			drive->MecanumDrive_Cartesian(
-					deadBand(stick->GetRawAxis(0)),
-					deadBand(stick->GetRawAxis(1)),
-					-turnPIDOutput.correction,
-					0.0);
-					//ahrs->GetAngle());
+				drive->MecanumDrive_Cartesian(
+						deadBand(stick->GetRawAxis(0)),
+						deadBand(stick->GetRawAxis(1)),
+						-turnPIDOutput.correction,
+						0.0);
 			}
 		} else {
 			turnController->Disable();
 
-		drive->MecanumDrive_Cartesian(
-				deadBand(stick->GetRawAxis(0)),
-				deadBand(stick->GetRawAxis(1)),
-				kSpinRateLimiter * (-1)*deadBand(stick->GetRawAxis(4)),
-				ahrs->GetAngle());
+			drive->MecanumDrive_Cartesian(
+					deadBand(stick->GetRawAxis(0)),
+					deadBand(stick->GetRawAxis(1)),
+					kSpinRateLimiter * (-1)*deadBand(stick->GetRawAxis(4)),
+					ahrs->GetAngle());
 		}
 		// DEBUG
 		//std::cout << std::setprecision(3) << std::fixed;
@@ -446,6 +451,19 @@ private:
 		//		  << "  Yaw: " << ahrs->GetYaw()
 		//		  << "  Pitch: " << ahrs->GetPitch()
 		//		  << "  Roll: " << ahrs->GetRoll() << std::endl;
+	}
+
+	void TestPeriodic() {
+		int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
+		if (count == 2) {
+			std::cout << m_targets[0].block.x << " " << m_targets[0].block.y << " "
+					<< m_targets[0].block.width << " " << m_targets[0].block.height << "      "
+					<< m_targets[1].block.x << " " << m_targets[1].block.y << " "
+					<< m_targets[1].block.width << " " << m_targets[1].block.height << std::endl;
+			double scale = 8.25/(abs(m_targets[0].block.x-m_targets[1].block.x));
+			double pixelOffset = (m_targets[0].block.x + m_targets[1].block.x)/2.0 - 160.0;
+			std::cout << "OFFSET = " << scale*pixelOffset << std::endl;
+		}
 	}
 };
 

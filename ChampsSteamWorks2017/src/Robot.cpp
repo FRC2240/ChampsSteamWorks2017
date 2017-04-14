@@ -52,9 +52,9 @@ private:
 	const double kStrafeOutputRange       = 0.2;
 
 	// Tunable parameters for the Strafe PID Controller
-	const double ksP = 0.02;
+	const double ksP = 0.03; // 0.02
 	const double ksI = 0.0;
-	const double ksD = 0.06;
+	const double ksD = 0.12; //0.06
 	const double ksF = 0.0;
 
 	// Tunable parameters for the Turn PID Controller
@@ -186,7 +186,7 @@ private:
 			int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
 			strafePIDSource.calcTargetOffset(m_targets, count);
 
-			drive->MecanumDrive_Cartesian(/*0.025*/-strafePIDOutput.correction, -0.32, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(/*0.025*/-strafePIDOutput.correction, -0.35, -turnPIDOutput.correction, 0.0);
 			// std::cout << "CORR = " << strafePIDOutput.correction << "  ";
 
 			double curr_world_linear_accel_x = ahrs->GetWorldLinearAccelX();
@@ -218,7 +218,7 @@ private:
 			gearServoLeft -> Set(kServoLeftOpen);
 		} else {
 			autoTimer = 0;
-			autoState = kDrivingBackward;
+			autoState = kAutoReleaseGear;
 		}
 	}
 
@@ -242,15 +242,19 @@ private:
 	void autoReleaseGear() {
 		autoTimer++;
 
-		if (autoTimer == 1) {
-			double targetPositionRotations = 25.0;
+		if (autoTimer == 10) {
+			//double targetPositionRotations = 25.0;
 			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->Set(targetPositionRotations);
-		} else if (autoTimer < 30) {
+			flooper->SetPosition(-18.0);
+			//flooper->Set(targetPositionRotations);
+		} else if (autoTimer < 40) {
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(-0.025, kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(-0.025, 0.5, -turnPIDOutput.correction, 0.0);
 		} else {
+			flooper->SetControlMode(CANSpeedController::kPosition);
+			flooper->SetPosition(18.0);
+
 			autoTimer = 0;
 			autoState = kDoNothing;
 		}			
@@ -314,13 +318,13 @@ private:
 
 		/* choose the sensor and sensor direction */
 		flooper->SetFeedbackDevice(CANTalon::CtreMagEncoder_Relative);
-		flooper->SetSensorDirection(false);
+		flooper->SetSensorDirection(true);
 		//_talon->ConfigEncoderCodesPerRev(XXX), // if using FeedbackDevice.QuadEncoder
 		//_talon->ConfigPotentiometerTurns(XXX), // if using FeedbackDevice.AnalogEncoder or AnalogPot
 
 		/* set the peak and nominal outputs, 12V means full */
 		flooper->ConfigNominalOutputVoltage(+0., -0.);
-		flooper->ConfigPeakOutputVoltage(+12., -12.);
+		flooper->ConfigPeakOutputVoltage(+8., -8.);
 		/* set the allowable closed-loop error,
 		 * Closed-Loop output will be neutral within this range.
 		 * See Table in Section 17.2.1 for native units per rotation.
@@ -332,6 +336,7 @@ private:
 		flooper->SetP(0.1);
 		flooper->SetI(0.0);
 		flooper->SetD(0.0);
+		flooper->SetControlMode(CANSpeedController::kPosition);
 		
 		// Create the Pixy instance and start streaming the frames
 		m_pixy = new PixyTracker();

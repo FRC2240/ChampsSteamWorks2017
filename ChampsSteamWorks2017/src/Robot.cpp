@@ -342,7 +342,6 @@ private:
 		flooper->SetP(0.1);
 		flooper->SetI(0.0);
 		flooper->SetD(0.0);
-		//flooper->SetControlMode(CANSpeedController::kPosition);
 		
 		// Create the Pixy instance and start streaming the frames
 		m_pixy = new PixyTracker();

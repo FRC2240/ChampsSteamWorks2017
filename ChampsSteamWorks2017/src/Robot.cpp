@@ -20,7 +20,7 @@ private:
 	double last_world_linear_accel_y = 0.0;
 	const std::string autoNameDefault = "center";
 	std::string autoSelected;
-	bool lastButton6;
+	bool lastButton6 = false;
 
 	// Servo constants
 	const double kServoRightOpen   = 0.3; //0.5;
@@ -44,9 +44,9 @@ private:
 
 	// Tunable parameters for autonomous
 	const double kAutoSpeed               = 0.4;
-	const double kCollisionThresholdDelta = 0.15;
+	const double kCollisionThresholdDelta = 0.5;
 	const int kTurningToGearTime          = 70;
-	const int kDriveToGearMaxTime         = 200;
+	const int kDriveToGearMaxTime         = 220;
 	const int kPlaceGearTime              = 50;
 	const int kDriveBackwardTime          = 50;
 	const double kStrafeOutputRange       = 0.2;
@@ -197,10 +197,13 @@ private:
 			last_world_linear_accel_y = curr_world_linear_accel_y;
 
 			// Hit the wall!
-			if ((abs(currentJerkX) > kCollisionThresholdDelta) || (abs(currentJerkY) > kCollisionThresholdDelta)) {
-				autoTimer = 0;
-				autoState = kPlacingGear;
-				drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
+			std::cout << autoTimer << "  X:" << fabs(currentJerkX) << "Y:" << fabs(currentJerkY) << std::endl;
+			if (autoTimer > 80) {
+				if ((fabs(currentJerkX) > kCollisionThresholdDelta) || (fabs(currentJerkY) > kCollisionThresholdDelta)) {
+					autoTimer = 0;
+					autoState = kPlacingGear;
+					drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
+				}
 			}
 
 		} else {
@@ -241,20 +244,23 @@ private:
 	
 	void autoReleaseGear() {
 		autoTimer++;
+		//std::cout << "AUTO RELEASE GEAR: " << flooper->GetPosition() << std::endl;
 
-		if (autoTimer == 10) {
+		if (autoTimer == 5) {
 			//double targetPositionRotations = 25.0;
 			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->SetPosition(-18.0);
+			flooper->Set(18.0);
 			//flooper->Set(targetPositionRotations);
 		} else if (autoTimer < 40) {
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(-0.025, 0.5, -turnPIDOutput.correction, 0.0);
-		} else {
+		} else if (autoTimer < 60) {
 			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->SetPosition(18.0);
-
+			flooper->Set(-18.0);
+		} else {
+			flooper->SetControlMode(CANSpeedController::kPercentVbus);
+			flooper->Set(0.0);
 			autoTimer = 0;
 			autoState = kDoNothing;
 		}			
@@ -336,7 +342,7 @@ private:
 		flooper->SetP(0.1);
 		flooper->SetI(0.0);
 		flooper->SetD(0.0);
-		flooper->SetControlMode(CANSpeedController::kPosition);
+		//flooper->SetControlMode(CANSpeedController::kPosition);
 		
 		// Create the Pixy instance and start streaming the frames
 		m_pixy = new PixyTracker();
@@ -344,6 +350,7 @@ private:
 	}
 
 	void AutonomousInit() {
+		std::cout << "auto init\n";
 		m_pixy->setTiltandBrightness(kTrackingBrightness, 0);
 		autoState = kDrivingForward; // Initial state
 		ahrs->ZeroYaw();             // Initialize to zero
@@ -353,12 +360,15 @@ private:
 
 		if (autoSelected.find("R") != std::string::npos) {
 			std::cout << "right\n";
-			autoDriveFowardTime = 120;
+			autoDriveFowardTime = 150;
 			autoTurnToGearAngle = -60.0;
 		} else if (autoSelected.find("L") != std::string::npos){
 			std::cout << "left\n";
 			autoDriveFowardTime = 170;
 			autoTurnToGearAngle = 60.0;
+		} else if (autoSelected.find("N") != std::string::npos){
+			std::cout << "none\n";
+			autoState = kAutoReleaseGear;
 		} else {
 			std::cout << "center\n";
 			driveAngle = 0.0;
@@ -389,6 +399,9 @@ private:
 		case kDrivingToGear:
 			autoDrivingToGear();
 			break;
+		case kAutoReleaseGear:
+			autoReleaseGear();
+			break;
 		default:
 		case kDoNothing:
 			autoDoNothing();
@@ -397,6 +410,7 @@ private:
 	}
 
 	void TeleopInit() {
+		std::cout << "tele init\n";
 		m_pixy->setTiltandBrightness(kNormalBrightness, 1);
 		m_pixy->clearTargets();
 	}
@@ -408,6 +422,7 @@ private:
 			gearServoRight -> Set(kServoRightOpen);
 			gearServoLeft -> Set(kServoLeftOpen);
 		} else if (!button6 && lastButton6){
+			std::cout << "tele start\n";
 			autoState = kAutoReleaseGear;
 			autoTimer = 0;
 			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
@@ -416,6 +431,7 @@ private:
 		}
 		lastButton6 = button6;
 		if (autoState == kAutoReleaseGear) {
+			std::cout << "tele rel\n";
 			autoReleaseGear();
 			return;
 		}

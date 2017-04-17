@@ -21,6 +21,9 @@ private:
 	const std::string autoNameDefault = "center";
 	std::string autoSelected;
 	bool lastButton6 = false;
+	bool lastButton4 = false;
+	double maxX = 0.0;
+	double maxY = 0.0;
 
 	// Servo constants
 	const double kServoRightOpen   = 0.3; //0.5;
@@ -44,9 +47,9 @@ private:
 
 	// Tunable parameters for autonomous
 	const double kAutoSpeed               = 0.4;
-	const double kCollisionThresholdDelta = 0.5;
+	const double kCollisionThresholdDelta = 1.0;
 	const int kTurningToGearTime          = 70;
-	const int kDriveToGearMaxTime         = 220;
+	int kDriveToGearMaxTime         = 200;
 	const int kPlaceGearTime              = 50;
 	const int kDriveBackwardTime          = 50;
 	const double kStrafeOutputRange       = 0.2;
@@ -54,7 +57,7 @@ private:
 	// Tunable parameters for the Strafe PID Controller
 	const double ksP = 0.03; // 0.02
 	const double ksI = 0.0;
-	const double ksD = 0.12; //0.06
+	const double ksD = 0.12; //0.12
 	const double ksF = 0.0;
 
 	// Tunable parameters for the Turn PID Controller
@@ -149,7 +152,7 @@ private:
 		if (autoTimer < autoDriveFowardTime) {
 			turnController->SetSetpoint(0.0);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(0.035, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(0.0, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
 		} else {
 			autoTimer = 0;
 			autoState = kTurningToGear;
@@ -161,10 +164,13 @@ private:
 		autoTimer++;
 
 		if (autoTimer < kTurningToGearTime) {
+			std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
 			turnController->SetSetpoint(autoTurnToGearAngle);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction * 0.5, ahrs->GetAngle());
+			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, ahrs->GetAngle());
+			std::cout << "  PID CORRECTION:  " << -turnPIDOutput.correction << std::endl;
 		} else {
+			std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
 			autoTimer = 0;
 			autoState = kDrivingToGear;
 			driveAngle = ahrs->GetAngle();
@@ -195,11 +201,20 @@ private:
 			double curr_world_linear_accel_y = ahrs->GetWorldLinearAccelY();
 			double currentJerkY = curr_world_linear_accel_y - last_world_linear_accel_y;
 			last_world_linear_accel_y = curr_world_linear_accel_y;
+			
+			currentJerkX = fabs(currentJerkX);
+			currentJerkY = fabs(currentJerkY);
+			if (currentJerkX > maxX) {
+				maxX = currentJerkX;
+			}
+			if (currentJerkY > maxY) {
+				maxY = currentJerkY;
+			}
 
 			// Hit the wall!
-			std::cout << autoTimer << "  X:" << fabs(currentJerkX) << "Y:" << fabs(currentJerkY) << std::endl;
-			if (autoTimer > 80) {
-				if ((fabs(currentJerkX) > kCollisionThresholdDelta) || (fabs(currentJerkY) > kCollisionThresholdDelta)) {
+		//	std::cout << autoTimer << "  X:" << currentJerkX << "  Y:" << currentJerkY << " maxX: " << maxX << " maxY: " << maxY << std::endl;
+			if (autoTimer > 40) {
+				if ((currentJerkX > kCollisionThresholdDelta) || (currentJerkY > kCollisionThresholdDelta)) {
 					autoTimer = 0;
 					autoState = kPlacingGear;
 					drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
@@ -208,7 +223,7 @@ private:
 
 		} else {
 			autoTimer = 0;
-			autoState = kDoNothing;
+			autoState = kPlacingGear;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
 		}
 	}
@@ -246,7 +261,7 @@ private:
 		autoTimer++;
 		//std::cout << "AUTO RELEASE GEAR: " << flooper->GetPosition() << std::endl;
 
-		if (autoTimer == 5) {
+		if (autoTimer == 1) {
 			//double targetPositionRotations = 25.0;
 			flooper->SetControlMode(CANSpeedController::kPosition);
 			flooper->Set(18.0);
@@ -255,10 +270,11 @@ private:
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(-0.025, 0.5, -turnPIDOutput.correction, 0.0);
-		} else if (autoTimer < 60) {
+		} else if (autoTimer == 40) {
+			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
 			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->Set(-18.0);
-		} else {
+			flooper->Set(0.0);
+		} else if (autoTimer > 60) {
 			flooper->SetControlMode(CANSpeedController::kPercentVbus);
 			flooper->Set(0.0);
 			autoTimer = 0;
@@ -349,6 +365,8 @@ private:
 	}
 
 	void AutonomousInit() {
+		maxX = 0;
+		maxY = 0;
 		std::cout << "auto init\n";
 		m_pixy->setTiltandBrightness(kTrackingBrightness, 0);
 		autoState = kDrivingForward; // Initial state
@@ -359,13 +377,14 @@ private:
 
 		if (autoSelected.find("R") != std::string::npos) {
 			std::cout << "right\n";
-			autoDriveFowardTime = 150;
+			autoDriveFowardTime = 130;
 			autoTurnToGearAngle = -60.0;
 		} else if (autoSelected.find("L") != std::string::npos){
 			std::cout << "left\n";
-			autoDriveFowardTime = 170;
+			autoDriveFowardTime = 140;
 			autoTurnToGearAngle = 60.0;
-		} else if (autoSelected.find("N") != std::string::npos){
+		}
+		else if (autoSelected.find("N") != std::string::npos){
 			std::cout << "none\n";
 			autoState = kAutoReleaseGear;
 		} else {
@@ -410,12 +429,14 @@ private:
 
 	void TeleopInit() {
 		std::cout << "tele init\n";
-		m_pixy->setTiltandBrightness(kNormalBrightness, 1);
+		//pixy->setTiltandBrightness(kNormalBrightness, 1);
 		m_pixy->clearTargets();
 	}
 
 	void TeleopPeriodic() {
+		kDriveToGearMaxTime = 120;
 		bool button6 = stick->GetRawButton(6);
+		bool button4 = stick->GetRawButton(4);
 		
 		if (button6) {
 			gearServoRight -> Set(kServoRightOpen);
@@ -429,11 +450,38 @@ private:
 			//gearServoLeft -> Set(kServoLeftClosed);
 		}
 		lastButton6 = button6;
-		if (autoState == kAutoReleaseGear) {
-			std::cout << "tele rel\n";
-			autoReleaseGear();
+		if (button4 && !lastButton4) {
+			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+			autoState = kDrivingToGear;
+			lastButton4 = button4;
 			return;
 		}
+		if (autoState == kDrivingToGear) {
+			if (button4 && !lastButton4) {
+				autoState = kDoNothing;
+			} else {
+				autoDrivingToGear();
+				return;
+			}
+		}
+		if (autoState == kPlacingGear) {
+			if (button4 && !lastButton4) {
+				autoState = kDoNothing;
+			} else {
+				autoPlacingGear();
+				return;
+			}
+		}
+		if (autoState == kAutoReleaseGear) {
+			//cout << "tele rel\n";
+			if (button4 && !lastButton4) {
+				autoState = kDoNothing;
+			} else {			
+				autoReleaseGear();
+				return;
+			}
+		}
+		lastButton4 = button4;
 		if (!button6) {
 			gearServoRight -> Set(kServoRightClosed);
 			gearServoLeft -> Set(kServoLeftClosed);
@@ -444,15 +492,17 @@ private:
 		} else{
 			climber -> Set(0.0);
 		}
+		
+		
 
-		if (stick -> GetRawButton(4)){
-			flooper ->Set(-.2);
-		} else if(stick -> GetRawButton(3)){
-			flooper -> Set(.2);
-		}
-		else {
-			flooper -> Set(0.0);
-		}
+		// (stick -> GetRawButton(4)){
+		//looper ->Set(-.2);
+		//else if(stick -> GetRawButton(3)){
+		//looper -> Set(.2);
+		//
+		//se {
+		//looper -> Set(0.0);
+		//
 		// Check for drive-mode toggle
 		/*
 		if (stick->GetRawButton(1)) {

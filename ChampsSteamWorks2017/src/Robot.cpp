@@ -22,6 +22,9 @@ private:
 	std::string autoSelected;
 	bool lastButton6 = false;
 	bool lastButton4 = false;
+	bool lastButton3 = false;
+	bool lastButton2 = false;
+
 	double maxX = 0.0;
 	double maxY = 0.0;
 
@@ -164,16 +167,16 @@ private:
 		autoTimer++;
 
 		if (autoTimer < kTurningToGearTime) {
-			std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
+			//std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
 			turnController->SetSetpoint(autoTurnToGearAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, ahrs->GetAngle());
-			std::cout << "  PID CORRECTION:  " << -turnPIDOutput.correction << std::endl;
+			//std::cout << "  PID CORRECTION:  " << -turnPIDOutput.correction << std::endl;
 		} else {
-			std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
+			//std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
 			autoTimer = 0;
 			autoState = kDrivingToGear;
-			driveAngle = ahrs->GetAngle();
+			driveAngle = autoTurnToGearAngle; //ahrs->GetAngle();
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
 		}
 	}
@@ -436,7 +439,9 @@ private:
 	void TeleopPeriodic() {
 		kDriveToGearMaxTime = 120;
 		bool button6 = stick->GetRawButton(6);
-		bool button4 = stick->GetRawButton(4);
+		bool button4 = stick->GetRawButton(4); // Center
+		bool button2 = stick->GetRawButton(2); // Right
+		bool button3 = stick->GetRawButton(3); // Left
 		
 		if (button6) {
 			gearServoRight -> Set(kServoRightOpen);
@@ -450,25 +455,60 @@ private:
 			//gearServoLeft -> Set(kServoLeftClosed);
 		}
 		lastButton6 = button6;
+		
 		if (button4 && !lastButton4) {
 			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
 			autoState = kDrivingToGear;
+			autoTimer = 0;
 			lastButton4 = button4;
 			return;
 		}
+		/*
+		if (button2 && !lastButton2) { //RIGHT
+			driveAngle = -60.0; //unwrapGyroAngle(ahrs->GetAngle());
+			autoState = kTurningToGear;
+			autoTimer = 0;
+			lastButton2 = button2;
+			return;
+		}
+		if (button3 && !lastButton3) { // LEFT
+			driveAngle = 60.0; //unwrapGyroAngle(ahrs->GetAngle());
+			autoState = kTurningToGear;
+			autoTimer = 0;
+			lastButton3 = button3;
+			return;
+		}
+		*/
+		lastButton2 = button2;
+		lastButton3 = button3;
+		
+		if (autoState == kTurningToGear) {
+			if (button4 && !lastButton4) {
+				autoState = kDoNothing;
+				lastButton4 = button4;
+			} else {
+				autoTurningToGear();
+				lastButton4 = button4;
+				return;
+			}
+		}		
 		if (autoState == kDrivingToGear) {
 			if (button4 && !lastButton4) {
 				autoState = kDoNothing;
+				lastButton4 = button4;				
 			} else {
 				autoDrivingToGear();
+				lastButton4 = button4;
 				return;
 			}
 		}
 		if (autoState == kPlacingGear) {
 			if (button4 && !lastButton4) {
 				autoState = kDoNothing;
+				lastButton4 = button4;				
 			} else {
 				autoPlacingGear();
+				lastButton4 = button4;
 				return;
 			}
 		}
@@ -476,12 +516,17 @@ private:
 			//cout << "tele rel\n";
 			if (button4 && !lastButton4) {
 				autoState = kDoNothing;
+				lastButton4 = button4;
 			} else {			
 				autoReleaseGear();
+				lastButton4 = button4;
 				return;
 			}
 		}
 		lastButton4 = button4;
+		lastButton3 = button3;
+		lastButton2 = button2;
+		
 		if (!button6) {
 			gearServoRight -> Set(kServoRightClosed);
 			gearServoLeft -> Set(kServoLeftClosed);
@@ -532,7 +577,7 @@ private:
 			wasButtonPushed = false;
 		}*/
 
-		if (stick->GetRawButton(1) || stick->GetRawButton(2)) {
+		if (stick->GetRawButton(1)/* || stick->GetRawButton(2)*/) {
 			if (!isRobotCentric) {
 
 				isRobotCentric = true;
@@ -559,19 +604,19 @@ private:
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 
-			if (stick->GetRawButton(2)) {
-				drive->MecanumDrive_Cartesian(
-						deadBand(0.0),
-						deadBand(stick->GetRawAxis(1)),
-						-turnPIDOutput.correction,
-						0.0);
-			} else {
+			//if (stick->GetRawButton(2)) {
+			//	drive->MecanumDrive_Cartesian(
+			//			deadBand(0.0),
+			//			deadBand(stick->GetRawAxis(1)),
+			//			-turnPIDOutput.correction,
+			//			0.0);
+			//} else {
 				drive->MecanumDrive_Cartesian(
 						deadBand(stick->GetRawAxis(0)),
 						deadBand(stick->GetRawAxis(1)),
 						-turnPIDOutput.correction,
 						0.0);
-			}
+			//}
 		} else {
 			turnController->Disable();
 

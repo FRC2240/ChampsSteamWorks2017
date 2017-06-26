@@ -1,16 +1,23 @@
 #include <iostream>
 #include <iomanip>
+#include <chrono>
 #include "WPILib.h"
 #include "PixyTracker.hpp"
 #include "AHRS.h"
 #include <CANTalon.h>
 #include <SmartDashboard/SmartDashboard.h>
+#include "log.h"
 
 class Robot: public IterativeRobot {
 private:
 
+	Preferences *prefs;
+	
 	Servo *gearServoRight;
 	Servo *gearServoLeft;
+	TalonSRX *feederMotor;
+	CANTalon *shooter;
+	double speed;
 	int timer = 0;
 	int autoTimer = 0;
 	TalonSRX *climber;
@@ -22,17 +29,15 @@ private:
 	std::string autoSelected;
 	bool lastButton6 = false;
 	bool lastButton4 = false;
-	bool lastButton3 = false;
-	bool lastButton2 = false;
 
 	double maxX = 0.0;
 	double maxY = 0.0;
 
 	// Servo constants
-	const double kServoRightOpen   = 0.3; //0.5;
-	const double kServoRightClosed = 0.0; //0.9; //-0.5;
-	const double kServoLeftOpen    = 0.0; //-0.1;
-	const double kServoLeftClosed  = 0.3; //0.5;
+	const double kServoRightOpen   = 0.3;
+	const double kServoRightClosed = 0.0;
+	const double kServoLeftOpen    = 0.0;
+	const double kServoLeftClosed  = 0.3;
 
 
 	// Tunable parameters for target detection
@@ -45,29 +50,33 @@ private:
 	// Tunable parameters for driving
 	const double kSpinRateLimiter = 0.5;
 
-	int autoDriveFowardTime    = 0;
 	double autoTurnToGearAngle = 0.0;
 
 	// Tunable parameters for autonomous
-	const double kAutoSpeed               = 0.4;
 	const double kCollisionThresholdDelta = 1.0;
 	const int kTurningToGearTime          = 70;
-	int kDriveToGearMaxTime         = 200;
 	const int kPlaceGearTime              = 50;
-	const int kDriveBackwardTime          = 50;
-	const double kStrafeOutputRange       = 0.2;
+	const int kDriveBackwardTime          = 100;
+
+	// Tuanble parameters
+	int autoDriveFowardTime;
+	double kAutoSpeed;
+	double kDrift;
+	double kSpin;	
+	double kStrafeOutputRange;
+	int kDriveToGearMaxTime;
 
 	// Tunable parameters for the Strafe PID Controller
-	const double ksP = 0.03; // 0.02
-	const double ksI = 0.0;
-	const double ksD = 0.12; //0.12
-	const double ksF = 0.0;
+	double ksP = 0.03;
+	double ksI = 0.0;
+	double ksD = 0.12;
+	double ksF = 0.0;
 
 	// Tunable parameters for the Turn PID Controller
-	const double kP = 0.01;
-	const double kI = 0.00;
-	const double kD = 0.03;
-	const double kF = 0.00;
+	double kP = 0.01;
+	double kI = 0.00;
+	double kD = 0.03;
+	double kF = 0.00;
 
 	/* This tuning parameter indicates how close to "on target" the    */
 	/* PID Controller will attempt to get.                             */
@@ -93,12 +102,12 @@ private:
 	TalonSRX   *lBackMotor;
 	TalonSRX   *rFrontMotor;
 	TalonSRX   *rBackMotor;
-	CANTalon   *flooper;
+	//CANTalon   *flooper;
 	Joystick   *stick;
 	AHRS       *ahrs; // navX MXP
 
-	PIDController *turnController;      // PID Controller
-	PIDController *strafeController;    // PID Controller
+	PIDController *turnController   = NULL;    // PID Controller
+	PIDController *strafeController = NULL;    // PID Controller
 
 	// Output from the Turn (Angle) PID Controller
 	class TurnPIDOutput : public PIDOutput {
@@ -125,20 +134,69 @@ private:
 		double PIDGet() {
 			return offset;
 		}
-		void calcTargetOffset(PixyTracker::Target* targets, int count) {
+		void calcTargetOffset(PixyTracker::Target* targets, int count, double theta) {
 			offset = 0.0;
 			if (count >= 2) {
-				scale = 8.25/(abs(targets[0].block.x - targets[1].block.x));
-				pixelOffset = (targets[0].block.x + targets[1].block.x)/2.0 - 160.0;
-				offset = scale*pixelOffset;
-				// std::cout << "OFFSET = " << offset << std::endl;
+				double target_width_pixels = abs(targets[0].block.x - targets[1].block.x);
+				double target_width_angle = 0.5*(PIXY_FIELD_OF_VIEW/PIXY_IMAGE_WIDTH_PIXELS)*target_width_pixels;
+				double distance_pixy_to_target = (TARGET_WIDTH_INCHES/2.0)/tan(target_width_angle*DEG_TO_RAD);
+				double height_target_to_pixy = PIXY_HEIGHT_INCHES - TARGET_HEIGHT_INCHES;
+				double sc = sqrt(distance_pixy_to_target*distance_pixy_to_target - height_target_to_pixy*height_target_to_pixy);
+				double scale = TARGET_WIDTH_INCHES/target_width_pixels;
+				double pixelOffset = (targets[0].block.x + targets[1].block.x)/2.0 - PIXY_IMAGE_WIDTH_PIXELS/2.0;
+
+				double target_offset_inches = scale*pixelOffset;
+				double thetab;
+				if (target_offset_inches < 0.0)
+					thetab = DEG_TO_RAD*(90.0+theta);
+				else
+					thetab = DEG_TO_RAD*(90.0-theta);
+				
+				double alpha = asin(target_offset_inches/sc*sin(thetab));
+				double k = PI-alpha-thetab;
+				double z = sin(k)/sin(thetab)*sc;
+				double tlen = z + 9.75;
+				double offz = sin(DEG_TO_RAD*theta)*tlen;
+				offset = target_offset_inches + offz;
+				
+				FILE_LOG(logDEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
+						<< ", distance: " << distance_pixy_to_target << ", pixel offset: " << pixelOffset
+						<< ", target offset: " << target_offset_inches << ", act off: " << offset;
 			}
 		}
 	private:
+		const double PI = 3.1415926;
+		const double DEG_TO_RAD = (PI/180.0);
+		const double PIXY_FIELD_OF_VIEW = 75.0; 
+		const double DISTANCE_PIXY_TO_ROBOT_CENTER = 9.75;
+		const double TARGET_WIDTH_INCHES = 8.25;
+		const double PIXY_IMAGE_WIDTH_PIXELS = 320.0;
+		const double TARGET_HEIGHT_INCHES = 13.25;
+		const double PIXY_HEIGHT_INCHES = 30.5;
+		
 		double scale;
 		double pixelOffset;
 		double offset;
 	} strafePIDSource;
+
+	// Read data from the Preferences Panel
+	void getPreferences()
+	{
+		kDriveToGearMaxTime = prefs->GetInt("kDriveToGearMaxTime", 200);
+		ksP = prefs->GetDouble("ksP", 0.02);
+		ksI = prefs->GetDouble("ksI", 0.0);
+		ksD = prefs->GetDouble("ksD", 0.2);
+		ksF = prefs->GetDouble("ksF", 0.0);
+
+		kP = prefs->GetDouble("kP", 0.01);
+		kI = prefs->GetDouble("kI", 0.0);
+		kD = prefs->GetDouble("kD", 0.15);
+		kF = prefs->GetDouble("kF", 0.0);
+
+		kAutoSpeed = prefs->GetDouble("kAutoSpeed", 0.4);
+		kDrift = prefs->GetDouble("kDrift", 0.05);
+		kStrafeOutputRange = prefs->GetDouble("kStrafeOutputRange", 0.3);
+	}
 
 	// Deadband filter
 	float deadBand(float stickValue) {
@@ -149,20 +207,26 @@ private:
 		}
 	}
 
+	// Drive forward for pre-defined time
 	void autoDrivingForward() {
 		autoTimer++;
 
 		if (autoTimer < autoDriveFowardTime) {
 			turnController->SetSetpoint(0.0);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(0.0, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(kDrift, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
 		} else {
 			autoTimer = 0;
 			autoState = kTurningToGear;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
+				
+			if (autoSelected.find("N") != std::string::npos){
+				autoState = kDoNothing;
+			}
 		}
 	}
 
+	// Turn toward the gear using the pre-defined angle
 	void autoTurningToGear() {
 		autoTimer++;
 
@@ -171,7 +235,6 @@ private:
 			turnController->SetSetpoint(autoTurnToGearAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, ahrs->GetAngle());
-			//std::cout << "  PID CORRECTION:  " << -turnPIDOutput.correction << std::endl;
 		} else {
 			//std::cout << "  ANGLE: " << ahrs -> GetAngle() << std::endl;
 			autoTimer = 0;
@@ -181,6 +244,7 @@ private:
 		}
 	}
 
+	// Drive forward to gear using Pixy and gyro for guidance
 	void autoDrivingToGear() {
 		autoTimer++;
 
@@ -193,10 +257,19 @@ private:
 
 			// Get targets from Pixy and calculate the offset from center
 			int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
-			strafePIDSource.calcTargetOffset(m_targets, count);
+			
+			for (int i=0; i<count; i++) {
+				FILE_LOG(logDEBUG) << "[Gear Target " << i << "] x: " << m_targets[i].block.x << ", y: " << m_targets[i].block.y
+								   << ", w: " << m_targets[i].block.width << ", h: " << m_targets[i].block.height;
+			}
+			
+			strafePIDSource.calcTargetOffset(m_targets, count, ahrs->GetAngle()-driveAngle);	
 
-			drive->MecanumDrive_Cartesian(/*0.025*/-strafePIDOutput.correction, -0.35, -turnPIDOutput.correction, 0.0);
-			// std::cout << "CORR = " << strafePIDOutput.correction << "  ";
+			drive->MecanumDrive_Cartesian(kDrift-strafePIDOutput.correction, -kAutoSpeed, kSpin-turnPIDOutput.correction, 0.0);
+			
+			FILE_LOG(logDEBUG) << "[autoDrivingToGear] timer: " << autoTimer << ", strafe correction: " << strafePIDOutput.correction
+					           << ", turn correction: " << turnPIDOutput.correction
+							   << ", drive angle: " << driveAngle << ", gyro angle: " << ahrs->GetAngle();
 
 			double curr_world_linear_accel_x = ahrs->GetWorldLinearAccelX();
 			double currentJerkX = curr_world_linear_accel_x - last_world_linear_accel_x;
@@ -215,7 +288,6 @@ private:
 			}
 
 			// Hit the wall!
-		//	std::cout << autoTimer << "  X:" << currentJerkX << "  Y:" << currentJerkY << " maxX: " << maxX << " maxY: " << maxY << std::endl;
 			if (autoTimer > 40) {
 				if ((currentJerkX > kCollisionThresholdDelta) || (currentJerkY > kCollisionThresholdDelta)) {
 					autoTimer = 0;
@@ -225,12 +297,14 @@ private:
 			}
 
 		} else {
+			FILE_LOG(logDEBUG) << "[autoDrivingToGear] END";
 			autoTimer = 0;
 			autoState = kPlacingGear;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
 		}
 	}
 
+	// Open the servos
 	void autoPlacingGear() {
 		autoTimer++;
 		if (autoTimer < kPlaceGearTime)
@@ -243,13 +317,14 @@ private:
 		}
 	}
 
+	// Gear released, drive backward to clear the spring
 	void autoDrivingBackward() {
 		autoTimer++;
 		if (autoTimer < kDriveBackwardTime)
 		{
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(-0.025, kAutoSpeed, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(-kDrift, kAutoSpeed, -turnPIDOutput.correction, 0.0);
 		} else {
 			autoTimer = 0;
 			autoState = kDoNothing;
@@ -260,31 +335,33 @@ private:
 		drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, ahrs->GetAngle()); //stop
 	}
 	
+	// Release the gear
 	void autoReleaseGear() {
 		autoTimer++;
 		//std::cout << "AUTO RELEASE GEAR: " << flooper->GetPosition() << std::endl;
 
 		if (autoTimer == 1) {
-			//double targetPositionRotations = 25.0;
-			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->Set(18.0);
-			//flooper->Set(targetPositionRotations);
+			////double targetPositionRotations = 25.0;
+			//flooper->SetControlMode(CANSpeedController::kPosition);
+			//flooper->Set(18.0);
+			////flooper->Set(targetPositionRotations);
 		} else if (autoTimer < 40) {
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(-0.025, 0.5, -turnPIDOutput.correction, 0.0);
 		} else if (autoTimer == 40) {
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
-			flooper->SetControlMode(CANSpeedController::kPosition);
-			flooper->Set(0.0);
+			//flooper->SetControlMode(CANSpeedController::kPosition);
+			//flooper->Set(0.0);
 		} else if (autoTimer > 60) {
-			flooper->SetControlMode(CANSpeedController::kPercentVbus);
-			flooper->Set(0.0);
+			//flooper->SetControlMode(CANSpeedController::kPercentVbus);
+			//flooper->Set(0.0);
 			autoTimer = 0;
 			autoState = kDoNothing;
 		}			
 	}
 
+	// Convert gyro to range of -180 to +180
 	double unwrapGyroAngle(double driveAngle) {
 		double rotations = floor(abs(driveAngle)/360.0);
 		if (driveAngle < 0.0) {
@@ -300,8 +377,28 @@ private:
 		return driveAngle;
 	}
 
+	// Reset the 'strafe' and 'turn' PID controllers
+	void resetPIDControllers() {
+		delete strafeController;
+		delete turnController;
+		
+		strafeController = new PIDController(ksP, ksI, ksD, ksF, &strafePIDSource, &strafePIDOutput);
+		strafeController->SetInputRange(-100.0, 100.0);
+		strafeController->SetOutputRange(-kStrafeOutputRange, kStrafeOutputRange);
+		strafeController->SetAbsoluteTolerance(kToleranceStrafe);
+		strafeController->SetContinuous(true);
+
+		turnController = new PIDController(kP, kI, kD, kF, ahrs, &turnPIDOutput);
+		turnController->SetInputRange(-180.0, 180.0);
+		turnController->SetOutputRange(-1.0, 1.0);
+		turnController->SetAbsoluteTolerance(kToleranceDegrees);
+		turnController->SetContinuous(true);
+	}
+
 	void RobotInit()
 	{
+		prefs = Preferences::GetInstance();
+		
 		gearServoRight = new Servo(5);
 		gearServoLeft = new Servo(3);
 		climber = new TalonSRX(7);
@@ -310,9 +407,24 @@ private:
 		lBackMotor	 = new TalonSRX(8); // 1
 		rFrontMotor  = new TalonSRX(1); // 8
 		rBackMotor	 = new TalonSRX(9); // 0
-		flooper      = new CANTalon(0);
+		//flooper      = new CANTalon(0);
+		
+		feederMotor = new TalonSRX(6);
+
 		rFrontMotor->SetInverted(true);
 		rBackMotor->SetInverted(true);
+		shooter = new CANTalon(0);
+		shooter -> SetTalonControlMode(CANTalon::kSpeedMode);
+		shooter -> Set(3700.0);
+		shooter -> SetSensorDirection(true);
+		shooter -> ConfigNominalOutputVoltage(+0.0, -0.0);
+		
+		shooter-> ConfigPeakOutputVoltage(+12., 0.0);
+		shooter-> SetFeedbackDevice(CANTalon::CtreMagEncoder_Relative);
+		shooter->SetF(0.024);	// 775 Pro
+		shooter->SetP(0.035);	// 775 Pro
+		shooter->SetI(0.00);	// 775 Pro
+		shooter->SetD(0.1);		
 
 		try {
 			ahrs = new AHRS(SPI::Port::kMXP);
@@ -324,43 +436,31 @@ private:
 
 		drive = new RobotDrive(lFrontMotor, lBackMotor, rFrontMotor, rBackMotor);
 		drive->SetSafetyEnabled(false);
-
-		turnController = new PIDController(kP, kI, kD, kF, ahrs, &turnPIDOutput);
-		turnController->SetInputRange(-180.0, 180.0);
-		turnController->SetOutputRange(-1.0, 1.0);
-		turnController->SetAbsoluteTolerance(kToleranceDegrees);
-		turnController->SetContinuous(true);
-
-		strafeController = new PIDController(ksP, ksI, ksD, ksF, &strafePIDSource, &strafePIDOutput);
-		strafeController->SetInputRange(-100.0, 100.0);
-		strafeController->SetOutputRange(-kStrafeOutputRange, kStrafeOutputRange);
-		strafeController->SetAbsoluteTolerance(kToleranceStrafe);
-		strafeController->SetContinuous(true);
 		
-		int absolutePosition = flooper->GetPulseWidthPosition() & 0xFFF; /* mask out the bottom12 bits, we don't care about the wrap arounds */
+		//int absolutePosition = flooper->GetPulseWidthPosition() & 0xFFF; /* mask out the bottom12 bits, we don't care about the wrap arounds */
 		/* use the low level API to set the quad encoder signal */
-		flooper->SetEncPosition(absolutePosition);
+		//flooper->SetEncPosition(absolutePosition);
 
 		/* choose the sensor and sensor direction */
-		flooper->SetFeedbackDevice(CANTalon::CtreMagEncoder_Relative);
-		flooper->SetSensorDirection(true);
-		//_talon->ConfigEncoderCodesPerRev(XXX), // if using FeedbackDevice.QuadEncoder
-		//_talon->ConfigPotentiometerTurns(XXX), // if using FeedbackDevice.AnalogEncoder or AnalogPot
+		//flooper->SetFeedbackDevice(CANTalon::CtreMagEncoder_Relative);
+		//flooper->SetSensorDirection(true);
+		////_talon->ConfigEncoderCodesPerRev(XXX), // if using FeedbackDevice.QuadEncoder
+		////_talon->ConfigPotentiometerTurns(XXX), // if using FeedbackDevice.AnalogEncoder or AnalogPot
 
 		/* set the peak and nominal outputs, 12V means full */
-		flooper->ConfigNominalOutputVoltage(+0., -0.);
-		flooper->ConfigPeakOutputVoltage(+8., -8.);
+		//flooper->ConfigNominalOutputVoltage(+0., -0.);
+		//flooper->ConfigPeakOutputVoltage(+8., -8.);
 		/* set the allowable closed-loop error,
 		 * Closed-Loop output will be neutral within this range.
 		 * See Table in Section 17.2.1 for native units per rotation.
 		 */
-		flooper->SetAllowableClosedLoopErr(0); /* always servo */
+		//flooper->SetAllowableClosedLoopErr(0); /* always servo */
 		/* set closed loop gains in slot0 */
-		flooper->SelectProfileSlot(0);
-		flooper->SetF(0.0);
-		flooper->SetP(0.1);
-		flooper->SetI(0.0);
-		flooper->SetD(0.0);
+		//flooper->SelectProfileSlot(0);
+		//flooper->SetF(0.0);
+		//flooper->SetP(0.1);
+		//flooper->SetI(0.0);
+		//flooper->SetD(0.0);
 		
 		// Create the Pixy instance and start streaming the frames
 		m_pixy = new PixyTracker();
@@ -370,28 +470,35 @@ private:
 	void AutonomousInit() {
 		maxX = 0;
 		maxY = 0;
-		std::cout << "auto init\n";
 		m_pixy->setTiltandBrightness(kTrackingBrightness, 0);
 		autoState = kDrivingForward; // Initial state
 		ahrs->ZeroYaw();             // Initialize to zero
+		
+		getPreferences();
+
+		FILE_LOG(logDEBUG) << "[AutoInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
+						   << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
+						   << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
+		FILE_LOG(logDEBUG) << "[AutoInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
+		
+		resetPIDControllers();	
 
 		autoSelected = SmartDashboard::GetString("Auto Selector", autoNameDefault);
-		std::cout << "Auto selected: " << autoSelected << std::endl;
+		FILE_LOG(logDEBUG) << "Auto selected: " << autoSelected;
 
 		if (autoSelected.find("R") != std::string::npos) {
-			std::cout << "right\n";
-			autoDriveFowardTime = 130;
+			FILE_LOG(logDEBUG) << "AUTO RIGHT GEAR";
+			autoDriveFowardTime = 140;
 			autoTurnToGearAngle = -60.0;
 		} else if (autoSelected.find("L") != std::string::npos){
-			std::cout << "left\n";
+			FILE_LOG(logDEBUG) << "AUTO LEFT GEAR";
 			autoDriveFowardTime = 140;
 			autoTurnToGearAngle = 60.0;
 		}
 		else if (autoSelected.find("N") != std::string::npos){
-			std::cout << "none\n";
-			autoState = kAutoReleaseGear;
+			FILE_LOG(logDEBUG) << "AUTO NO GEAR";
 		} else {
-			std::cout << "center\n";
+			FILE_LOG(logDEBUG) << "AUTO RIGHT CENTER";
 			driveAngle = 0.0;
 			autoState = kDrivingToGear;
 		}
@@ -431,67 +538,36 @@ private:
 	}
 
 	void TeleopInit() {
-		std::cout << "tele init\n";
 		//pixy->setTiltandBrightness(kNormalBrightness, 1);
 		m_pixy->clearTargets();
+		autoState = kDoNothing;
+		
+		getPreferences();
+
+		FILE_LOG(logDEBUG) << "[TeleopInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
+						   << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
+						   << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
+		FILE_LOG(logDEBUG) << "[TeleopInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
+
+		FILE_LOG(logDEBUG) << "[TeleopInit] gyro angle: " << ahrs->GetAngle();
+		
+		resetPIDControllers();
 	}
 
 	void TeleopPeriodic() {
-		kDriveToGearMaxTime = 120;
 		bool button6 = stick->GetRawButton(6);
-		bool button4 = stick->GetRawButton(4); // Center
-		bool button2 = stick->GetRawButton(2); // Right
-		bool button3 = stick->GetRawButton(3); // Left
+		bool button4 = stick->GetRawButton(4);
 		
 		if (button6) {
 			gearServoRight -> Set(kServoRightOpen);
 			gearServoLeft -> Set(kServoLeftOpen);
 		} else if (!button6 && lastButton6){
-			std::cout << "tele start\n";
 			autoState = kAutoReleaseGear;
 			autoTimer = 0;
 			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
-			//gearServoRight -> Set(kServoRightClosed);
-			//gearServoLeft -> Set(kServoLeftClosed);
 		}
 		lastButton6 = button6;
 		
-		if (button4 && !lastButton4) {
-			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
-			autoState = kDrivingToGear;
-			autoTimer = 0;
-			lastButton4 = button4;
-			return;
-		}
-		/*
-		if (button2 && !lastButton2) { //RIGHT
-			driveAngle = -60.0; //unwrapGyroAngle(ahrs->GetAngle());
-			autoState = kTurningToGear;
-			autoTimer = 0;
-			lastButton2 = button2;
-			return;
-		}
-		if (button3 && !lastButton3) { // LEFT
-			driveAngle = 60.0; //unwrapGyroAngle(ahrs->GetAngle());
-			autoState = kTurningToGear;
-			autoTimer = 0;
-			lastButton3 = button3;
-			return;
-		}
-		*/
-		lastButton2 = button2;
-		lastButton3 = button3;
-		
-		if (autoState == kTurningToGear) {
-			if (button4 && !lastButton4) {
-				autoState = kDoNothing;
-				lastButton4 = button4;
-			} else {
-				autoTurningToGear();
-				lastButton4 = button4;
-				return;
-			}
-		}		
 		if (autoState == kDrivingToGear) {
 			if (button4 && !lastButton4) {
 				autoState = kDoNothing;
@@ -513,7 +589,6 @@ private:
 			}
 		}
 		if (autoState == kAutoReleaseGear) {
-			//cout << "tele rel\n";
 			if (button4 && !lastButton4) {
 				autoState = kDoNothing;
 				lastButton4 = button4;
@@ -523,9 +598,15 @@ private:
 				return;
 			}
 		}
+		if (button4 && !lastButton4) {
+			resetPIDControllers();
+			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+			autoState = kDrivingToGear;
+			autoTimer = 0;
+			lastButton4 = button4;
+			return;
+		}
 		lastButton4 = button4;
-		lastButton3 = button3;
-		lastButton2 = button2;
 		
 		if (!button6) {
 			gearServoRight -> Set(kServoRightClosed);
@@ -538,85 +619,47 @@ private:
 			climber -> Set(0.0);
 		}
 		
-		
+		if (stick -> GetRawAxis(3)) {
+			++timer;
+			speed = shooter -> GetSpeed();
+			shooter -> SetTalonControlMode(CANTalon::kSpeedMode);
+			shooter -> Set(3700.0);
 
-		// (stick -> GetRawButton(4)){
-		//looper ->Set(-.2);
-		//else if(stick -> GetRawButton(3)){
-		//looper -> Set(.2);
-		//
-		//se {
-		//looper -> Set(0.0);
-		//
-		// Check for drive-mode toggle
-		/*
-		if (stick->GetRawButton(1)) {
-			if (!wasButtonPushed) {
-				isRobotCentric = !isRobotCentric;
+			FILE_LOG(logDEBUG) << "[Launcher] speed: " << speed;
 
-				if (isRobotCentric) {
-					driveAngle = ahrs->GetAngle();
-					double rotations = floor(abs(driveAngle)/360.0);
-					if (driveAngle < 0.0) {
-						driveAngle+= rotations*360.0;
-					} else {
-						driveAngle-= rotations*360.0;
-					}
-					if (driveAngle > 180.0) {
-						driveAngle-=360.0;
-					} else if (driveAngle < -180.0) {
-						driveAngle+=360.0;
-					}
+			if (timer == 50) {
+				FILE_LOG(logDEBUG) << "[Feeder] START";
 
-				std::cout << "set drive angle\n";
-				}
+				timer = 0;
+				feederMotor ->Set(0.7);
 			}
-
-			wasButtonPushed = true;
 		} else {
-			wasButtonPushed = false;
-		}*/
+			timer = 0;
+			feederMotor -> Set(0.0);
+			shooter -> Set(0.0);
+		}		
 
-		if (stick->GetRawButton(1)/* || stick->GetRawButton(2)*/) {
+		if (stick->GetRawButton(1)) {
 			if (!isRobotCentric) {
-
 				isRobotCentric = true;
-
 				driveAngle = unwrapGyroAngle(ahrs->GetAngle());
-				/*double rotations = floor(abs(driveAngle)/360.0);
-				if (driveAngle < 0.0) {
-					driveAngle+= rotations*360.0;
-				} else {
-					driveAngle-= rotations*360.0;
-				}
-				if (driveAngle > 180.0) {
-					driveAngle-=360.0;
-				} else if (driveAngle < -180.0) {
-					driveAngle+=360.0;
-				}*/
 			}
 		} else {
 			isRobotCentric = false;
 		}
 
 		if (isRobotCentric) {
-			std::cout << "Robot Centric: " << ahrs->GetAngle() << " " << driveAngle << " " << turnPIDOutput.correction << std::endl;
+			FILE_LOG(logDEBUG) << "[Robot Centric] gyro angle: " << ahrs->GetAngle()
+					           << ", drive angle: " << driveAngle
+							   << ", PID correction: " << turnPIDOutput.correction;
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 
-			//if (stick->GetRawButton(2)) {
-			//	drive->MecanumDrive_Cartesian(
-			//			deadBand(0.0),
-			//			deadBand(stick->GetRawAxis(1)),
-			//			-turnPIDOutput.correction,
-			//			0.0);
-			//} else {
-				drive->MecanumDrive_Cartesian(
-						deadBand(stick->GetRawAxis(0)),
-						deadBand(stick->GetRawAxis(1)),
-						-turnPIDOutput.correction,
-						0.0);
-			//}
+			drive->MecanumDrive_Cartesian(
+					deadBand(stick->GetRawAxis(0)),
+					deadBand(stick->GetRawAxis(1)),
+					-turnPIDOutput.correction,
+					0.0);
 		} else {
 			turnController->Disable();
 
@@ -626,30 +669,61 @@ private:
 					kSpinRateLimiter * (-1)*deadBand(stick->GetRawAxis(4)),
 					ahrs->GetAngle());
 		}
-		// DEBUG
-		//std::cout << std::setprecision(3) << std::fixed;
-		//std::cout << "Axis 0: " << stick->GetRawAxis(0) << "  Axis 1: " << stick->GetRawAxis(1) << "  Axis 4: " << stick->GetRawAxis(4) << std::endl;
-
-		//std::cout << "Motors = LF: " << lFrontMotor->Get() << "  RF: " << rFrontMotor->Get() << "  LR: " <<
-		//		lBackMotor->Get() << "  RR: " << rBackMotor->Get() << std::endl;
-
-		//std::cout << "Angle: " << ahrs->GetAngle() << "  Rate: " << ahrs->GetRate() << std::endl;
-		//std::cout << "Angle: " << ahrs->GetAngle()
-		//		  << "  Yaw: " << ahrs->GetYaw()
-		//		  << "  Pitch: " << ahrs->GetPitch()
-		//		  << "  Roll: " << ahrs->GetRoll() << std::endl;
 	}
-
+	
+	void TestInit() {
+		ahrs->ZeroYaw();
+	}
+	
 	void TestPeriodic() {
+		double theta = ahrs->GetAngle();
+		double offset = 0.0;
+
+		const double PI = 3.1415926;
+		const double DEG_TO_RAD = (PI/180.0);
+		const double PIXY_FIELD_OF_VIEW = 75.0; 
+		const double DISTANCE_PIXY_TO_ROBOT_CENTER = 9.75;
+		const double TARGET_WIDTH_INCHES = 8.25;
+		const double PIXY_IMAGE_WIDTH_PIXELS = 320.0;
+		const double TARGET_HEIGHT_INCHES = 13.25;
+		const double PIXY_HEIGHT_INCHES = 30.5;
+					
 		int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
 		if (count == 2) {
 			std::cout << m_targets[0].block.x << " " << m_targets[0].block.y << " "
 					<< m_targets[0].block.width << " " << m_targets[0].block.height << "      "
 					<< m_targets[1].block.x << " " << m_targets[1].block.y << " "
-					<< m_targets[1].block.width << " " << m_targets[1].block.height << std::endl;
-			double scale = 8.25/(abs(m_targets[0].block.x-m_targets[1].block.x));
-			double pixelOffset = (m_targets[0].block.x + m_targets[1].block.x)/2.0 - 160.0;
-			std::cout << "OFFSET = " << scale*pixelOffset << std::endl;
+					<< m_targets[1].block.width << " "
+							"" << m_targets[1].block.height << std::endl;
+			
+			double target_width_pixels = abs(m_targets[0].block.x - m_targets[1].block.x);
+			double target_width_angle = 0.5*(PIXY_FIELD_OF_VIEW/PIXY_IMAGE_WIDTH_PIXELS)*target_width_pixels;
+			double distance_pixy_to_target = (TARGET_WIDTH_INCHES/2.0)/tan(target_width_angle*DEG_TO_RAD);
+			double height_target_to_pixy = PIXY_HEIGHT_INCHES - TARGET_HEIGHT_INCHES;
+			double sc = sqrt(distance_pixy_to_target*distance_pixy_to_target - height_target_to_pixy*height_target_to_pixy);
+			double scale = TARGET_WIDTH_INCHES/target_width_pixels;
+			double pixelOffset = (m_targets[0].block.x + m_targets[1].block.x)/2.0 - PIXY_IMAGE_WIDTH_PIXELS/2.0;
+		
+			double target_offset_inches = -scale*pixelOffset;
+			double thetab;
+			if (target_offset_inches < 0.0)
+				thetab = DEG_TO_RAD*(90.0+theta);
+			else
+				thetab = DEG_TO_RAD*(90.0-theta);
+			
+			double alpha = asin(target_offset_inches/sc*sin(thetab));
+			double k = PI-alpha-thetab;
+			double z = sin(k)/sin(thetab)*sc;
+			double tlen = z + DISTANCE_PIXY_TO_ROBOT_CENTER;
+			double offz = -sin(DEG_TO_RAD*theta)*tlen;
+			offset = target_offset_inches + offz;
+
+			FILE_LOG(logDEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
+					<< ", distance: " << distance_pixy_to_target << ", pixel offset: " << pixelOffset
+					<< ", target offset: " << target_offset_inches
+					<< ", offz: " << offz
+					<< ", offset: " << offset;						
+			FILE_LOG(logDEBUG) << "gyro angle: " << ahrs->GetAngle();				
 		}
 	}
 };

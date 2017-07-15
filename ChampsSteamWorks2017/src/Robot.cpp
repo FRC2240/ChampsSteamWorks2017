@@ -4,9 +4,19 @@
 #include "WPILib.h"
 #include "PixyTracker.hpp"
 #include "AHRS.h"
+#include "kalman.h"
 #include <CANTalon.h>
 #include <SmartDashboard/SmartDashboard.h>
 #include "log.h"
+
+const double PI = 3.1415926;
+const double DEG_TO_RAD = PI/180.0;
+const double PIXY_FIELD_OF_VIEW = 75.0;
+const double DISTANCE_PIXY_TO_ROBOT_CENTER = 9.75;
+const double TARGET_WIDTH_INCHES = 8.25;
+const double PIXY_IMAGE_WIDTH_PIXELS = 320.0;
+const double TARGET_HEIGHT_INCHES = 13.25;
+const double PIXY_HEIGHT_INCHES = 30.5;
 
 class Robot: public IterativeRobot {
 private:
@@ -29,10 +39,12 @@ private:
 	std::string autoSelected;
 	bool lastButton6 = false;
 	bool lastButton4 = false;
+	bool lastButton2 = false;
+	Kalman *filter;
 
 	double maxX = 0.0;
 	double maxY = 0.0;
-
+	
 	// Servo constants
 	const double kServoRightOpen   = 0.3;
 	const double kServoRightClosed = 0.0;
@@ -58,13 +70,17 @@ private:
 	const int kPlaceGearTime              = 50;
 	const int kDriveBackwardTime          = 100;
 
-	// Tuanble parameters
+	// Tunable parameters
 	int autoDriveFowardTime;
 	double kAutoSpeed;
 	double kDrift;
 	double kSpin;	
 	double kStrafeOutputRange;
+	double kTurnOutputRange;
 	int kDriveToGearMaxTime;
+	double kBoilerTargetWidth;
+	int kBoilerTargetHeight;
+	double kBoilerTargetOffset;
 
 	// Tunable parameters for the Strafe PID Controller
 	double ksP = 0.03;
@@ -77,10 +93,13 @@ private:
 	double kI = 0.00;
 	double kD = 0.03;
 	double kF = 0.00;
+	
+	double kKalmanProcessNoise;
+	double kKalmanSensorNoise;
 
 	/* This tuning parameter indicates how close to "on target" the    */
 	/* PID Controller will attempt to get.                             */
-	const double kToleranceDegrees = 1.0;
+	const double kToleranceDegrees = 0.25;
 	const double kToleranceStrafe = 0.01;
 
 	enum AutoState {
@@ -90,7 +109,10 @@ private:
 		kDrivingBackward,
 		kTurningToGear,
 		kDrivingToGear,
-		kAutoReleaseGear
+		kAutoReleaseGear,
+		kTurningToBoiler,
+		kDrivingToBoiler,
+		kReadyToLaunch
 	} autoState = kDoNothing;
 
 	PixyTracker *m_pixy;
@@ -130,7 +152,7 @@ private:
 	// Data source for the Strafe PID Controller
 	class StrafePIDSource : public PIDSource {
 	public:
-		StrafePIDSource() : offset(0.0) {}
+		StrafePIDSource() : scale(0.0), pixelOffset(0), offset(0.0) {}
 		double PIDGet() {
 			return offset;
 		}
@@ -164,16 +186,7 @@ private:
 						<< ", target offset: " << target_offset_inches << ", act off: " << offset;
 			}
 		}
-	private:
-		const double PI = 3.1415926;
-		const double DEG_TO_RAD = (PI/180.0);
-		const double PIXY_FIELD_OF_VIEW = 75.0; 
-		const double DISTANCE_PIXY_TO_ROBOT_CENTER = 9.75;
-		const double TARGET_WIDTH_INCHES = 8.25;
-		const double PIXY_IMAGE_WIDTH_PIXELS = 320.0;
-		const double TARGET_HEIGHT_INCHES = 13.25;
-		const double PIXY_HEIGHT_INCHES = 30.5;
-		
+	private:	
 		double scale;
 		double pixelOffset;
 		double offset;
@@ -188,14 +201,21 @@ private:
 		ksD = prefs->GetDouble("ksD", 0.2);
 		ksF = prefs->GetDouble("ksF", 0.0);
 
-		kP = prefs->GetDouble("kP", 0.01);
+		kP = prefs->GetDouble("kP", 0.02);
 		kI = prefs->GetDouble("kI", 0.0);
-		kD = prefs->GetDouble("kD", 0.15);
+		kD = prefs->GetDouble("kD", 0.2);
 		kF = prefs->GetDouble("kF", 0.0);
 
 		kAutoSpeed = prefs->GetDouble("kAutoSpeed", 0.4);
 		kDrift = prefs->GetDouble("kDrift", 0.05);
 		kStrafeOutputRange = prefs->GetDouble("kStrafeOutputRange", 0.3);
+		kTurnOutputRange = prefs->GetDouble("kTurnOutputRange", 0.2);
+
+		kBoilerTargetWidth = prefs->GetDouble("kBoilerTargetWidth", 70.0);
+		kBoilerTargetHeight = prefs->GetDouble("kBoilerTargetHeight", 20.0);
+		kBoilerTargetOffset = prefs->GetDouble("kBoilerTargetOffset", 9.0);
+		kKalmanProcessNoise = prefs->GetDouble("kKalmanProcessNoise", 0.05);
+		kKalmanSensorNoise = prefs->GetDouble("kKalmanSensorNoise", 8.0);
 	}
 
 	// Deadband filter
@@ -348,7 +368,7 @@ private:
 		} else if (autoTimer < 40) {
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
-			drive->MecanumDrive_Cartesian(-0.025, 0.5, -turnPIDOutput.correction, 0.0);
+			drive->MecanumDrive_Cartesian(-kDrift, 0.5, -turnPIDOutput.correction, 0.0);
 		} else if (autoTimer == 40) {
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
 			//flooper->SetControlMode(CANSpeedController::kPosition);
@@ -359,6 +379,52 @@ private:
 			autoTimer = 0;
 			autoState = kDoNothing;
 		}			
+	}
+	
+	void autoDrivingToBoiler() {
+		autoTimer++;
+		turnController->Enable();
+
+		int count = m_pixy->getBlocksForSignature(m_signature, 1, m_targets);
+		driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+		double pixelOffset = (count) ? m_targets[0].block.x - PIXY_IMAGE_WIDTH_PIXELS/2.0: 0.0;
+		double angleOffset = pixelOffset * (PIXY_FIELD_OF_VIEW/PIXY_IMAGE_WIDTH_PIXELS);
+
+		FILE_LOG(logDEBUG) << "gyro angle: " << driveAngle << ", offset: " << angleOffset
+				           << ", setpoint: " << turnController->GetSetpoint();
+
+		FILE_LOG(logDEBUG) << "autoDrivingToBoiler: width: " << m_targets[0].block.width
+					       << ", height: " << m_targets[0].block.height << ", center: " << m_targets[0].block.x;
+
+		if (autoTimer < 100) {
+			// just turning
+			turnController->SetSetpoint(driveAngle + angleOffset + kBoilerTargetOffset);
+			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
+			if (angleOffset < 2.0) {
+				// start driving
+				autoTimer = 100;
+			}
+		} else if (autoTimer < 300) {
+			// driving forward
+			turnController->SetSetpoint(driveAngle + angleOffset + kBoilerTargetOffset);
+			drive->MecanumDrive_Cartesian(kDrift, -kAutoSpeed, -turnPIDOutput.correction, 0.0);
+
+			// At correct distance?
+			double filtered = filter->getFilteredValue(double(m_targets[0].block.width));
+			FILE_LOG(logDEBUG) << "time: " << autoTimer << ", width: " << m_targets[0].block.width << " " << filtered;
+
+			if (filtered > kBoilerTargetWidth) {
+				drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
+				autoTimer = 300;
+			}
+		} else if (autoTimer < 400) {
+			// settle down
+			turnController->SetSetpoint(driveAngle + angleOffset + kBoilerTargetOffset);
+			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
+		} else {
+			autoState = kDoNothing;
+			autoTimer = 0;
+		}
 	}
 
 	// Convert gyro to range of -180 to +180
@@ -381,6 +447,7 @@ private:
 	void resetPIDControllers() {
 		delete strafeController;
 		delete turnController;
+		delete filter;
 		
 		strafeController = new PIDController(ksP, ksI, ksD, ksF, &strafePIDSource, &strafePIDOutput);
 		strafeController->SetInputRange(-100.0, 100.0);
@@ -390,9 +457,11 @@ private:
 
 		turnController = new PIDController(kP, kI, kD, kF, ahrs, &turnPIDOutput);
 		turnController->SetInputRange(-180.0, 180.0);
-		turnController->SetOutputRange(-1.0, 1.0);
+		turnController->SetOutputRange(-kTurnOutputRange, kTurnOutputRange);
 		turnController->SetAbsoluteTolerance(kToleranceDegrees);
 		turnController->SetContinuous(true);
+		
+		filter = new Kalman(kKalmanProcessNoise, kKalmanSensorNoise, 1000.0, 20.0);
 	}
 
 	void RobotInit()
@@ -436,7 +505,7 @@ private:
 
 		drive = new RobotDrive(lFrontMotor, lBackMotor, rFrontMotor, rBackMotor);
 		drive->SetSafetyEnabled(false);
-		
+				
 		//int absolutePosition = flooper->GetPulseWidthPosition() & 0xFFF; /* mask out the bottom12 bits, we don't care about the wrap arounds */
 		/* use the low level API to set the quad encoder signal */
 		//flooper->SetEncPosition(absolutePosition);
@@ -557,6 +626,7 @@ private:
 	void TeleopPeriodic() {
 		bool button6 = stick->GetRawButton(6);
 		bool button4 = stick->GetRawButton(4);
+		bool button2 = stick->GetRawButton(2);
 		
 		if (button6) {
 			gearServoRight -> Set(kServoRightOpen);
@@ -598,6 +668,18 @@ private:
 				return;
 			}
 		}
+	
+		if (autoState == kDrivingToBoiler) {
+			if (button2 && !lastButton2) {
+				autoState = kDoNothing;
+				lastButton2 = button2;
+			} else {			
+				autoDrivingToBoiler();
+				lastButton2 = button2;
+				return;
+			}
+		}
+	
 		if (button4 && !lastButton4) {
 			resetPIDControllers();
 			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
@@ -606,7 +688,16 @@ private:
 			lastButton4 = button4;
 			return;
 		}
+		if (button2 && !lastButton2) {
+			resetPIDControllers();
+			driveAngle = unwrapGyroAngle(ahrs->GetAngle());
+			autoState = kDrivingToBoiler;
+			autoTimer = 0;
+			lastButton2 = button2;
+			return;
+		}		
 		lastButton4 = button4;
+		lastButton2 = button2;
 		
 		if (!button6) {
 			gearServoRight -> Set(kServoRightClosed);

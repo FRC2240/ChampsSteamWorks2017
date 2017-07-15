@@ -68,7 +68,7 @@ private:
 	const double kCollisionThresholdDelta = 1.0;
 	const int kTurningToGearTime          = 70;
 	const int kPlaceGearTime              = 50;
-	const int kDriveBackwardTime          = 100;
+	const int kDriveBackwardTime          = 200;
 
 	// Tunable parameters
 	int autoDriveFowardTime;
@@ -106,13 +106,10 @@ private:
 		kDoNothing,
 		kDrivingForward,
 		kPlacingGear,
-		kDrivingBackward,
 		kTurningToGear,
 		kDrivingToGear,
 		kAutoReleaseGear,
-		kTurningToBoiler,
-		kDrivingToBoiler,
-		kReadyToLaunch
+		kDrivingToBoiler
 	} autoState = kDoNothing;
 
 	PixyTracker *m_pixy;
@@ -206,7 +203,7 @@ private:
 		kD = prefs->GetDouble("kD", 0.2);
 		kF = prefs->GetDouble("kF", 0.0);
 
-		kAutoSpeed = prefs->GetDouble("kAutoSpeed", 0.4);
+		kAutoSpeed = prefs->GetDouble("kAutoSpeed", 0.42);
 		kDrift = prefs->GetDouble("kDrift", 0.05);
 		kStrafeOutputRange = prefs->GetDouble("kStrafeOutputRange", 0.3);
 		kTurnOutputRange = prefs->GetDouble("kTurnOutputRange", 0.2);
@@ -337,20 +334,6 @@ private:
 		}
 	}
 
-	// Gear released, drive backward to clear the spring
-	void autoDrivingBackward() {
-		autoTimer++;
-		if (autoTimer < kDriveBackwardTime)
-		{
-			turnController->SetSetpoint(driveAngle);
-			turnController->Enable();
-			drive->MecanumDrive_Cartesian(-kDrift, kAutoSpeed, -turnPIDOutput.correction, 0.0);
-		} else {
-			autoTimer = 0;
-			autoState = kDoNothing;
-		}
-	}
-
 	void autoDoNothing() {
 		drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, ahrs->GetAngle()); //stop
 	}
@@ -365,15 +348,15 @@ private:
 			//flooper->SetControlMode(CANSpeedController::kPosition);
 			//flooper->Set(18.0);
 			////flooper->Set(targetPositionRotations);
-		} else if (autoTimer < 40) {
+		} else if (autoTimer < 75) {
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 			drive->MecanumDrive_Cartesian(-kDrift, 0.5, -turnPIDOutput.correction, 0.0);
-		} else if (autoTimer == 40) {
+		} else if (autoTimer == 75) {
 			drive->MecanumDrive_Cartesian(0.0, 0.0, -turnPIDOutput.correction, 0.0);
 			//flooper->SetControlMode(CANSpeedController::kPosition);
 			//flooper->Set(0.0);
-		} else if (autoTimer > 60) {
+		} else if (autoTimer > 100) {
 			//flooper->SetControlMode(CANSpeedController::kPercentVbus);
 			//flooper->Set(0.0);
 			autoTimer = 0;
@@ -586,9 +569,6 @@ private:
 			break;
 		case kPlacingGear:
 			autoPlacingGear();
-			break;
-		case kDrivingBackward:
-			autoDrivingBackward();
 			break;
 		case kTurningToGear:
 			autoTurningToGear();

@@ -81,6 +81,8 @@ private:
 	double kBoilerTargetWidth;
 	int kBoilerTargetHeight;
 	double kBoilerTargetOffset;
+	std::string kLogLevel;
+
 
 	// Tunable parameters for the Strafe PID Controller
 	double ksP = 0.03;
@@ -178,7 +180,7 @@ private:
 				double offz = sin(DEG_TO_RAD*theta)*tlen;
 				offset = target_offset_inches + offz;
 				
-				FILE_LOG(logDEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
+				LOGGER(DEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
 						<< ", distance: " << distance_pixy_to_target << ", pixel offset: " << pixelOffset
 						<< ", target offset: " << target_offset_inches << ", act off: " << offset;
 			}
@@ -192,7 +194,7 @@ private:
 	// Read data from the Preferences Panel
 	void getPreferences()
 	{
-		kDriveToGearMaxTime = prefs->GetInt("kDriveToGearMaxTime", 200);
+		kDriveToGearMaxTime = prefs->GetInt("kDriveToGearMaxTime", 160);
 		ksP = prefs->GetDouble("ksP", 0.02);
 		ksI = prefs->GetDouble("ksI", 0.0);
 		ksD = prefs->GetDouble("ksD", 0.2);
@@ -213,6 +215,9 @@ private:
 		kBoilerTargetOffset = prefs->GetDouble("kBoilerTargetOffset", 9.0);
 		kKalmanProcessNoise = prefs->GetDouble("kKalmanProcessNoise", 0.05);
 		kKalmanSensorNoise = prefs->GetDouble("kKalmanSensorNoise", 8.0);
+
+		kLogLevel = prefs->GetString("kLogLevel", "INFO");
+		Log::SetLevel(Log::FromString(kLogLevel));
 	}
 
 	// Deadband filter
@@ -276,17 +281,17 @@ private:
 			int count = m_pixy->getBlocksForSignature(m_signature, 2, m_targets);
 			
 			for (int i=0; i<count; i++) {
-				FILE_LOG(logDEBUG) << "[Gear Target " << i << "] x: " << m_targets[i].block.x << ", y: " << m_targets[i].block.y
-								   << ", w: " << m_targets[i].block.width << ", h: " << m_targets[i].block.height;
+				LOGGER(DEBUG) << "[Gear Target " << i << "] x: " << m_targets[i].block.x << ", y: " << m_targets[i].block.y
+						      << ", w: " << m_targets[i].block.width << ", h: " << m_targets[i].block.height;
 			}
 			
 			strafePIDSource.calcTargetOffset(m_targets, count, ahrs->GetAngle()-driveAngle);	
 
 			drive->MecanumDrive_Cartesian(kDrift-strafePIDOutput.correction, -kAutoSpeed, kSpin-turnPIDOutput.correction, 0.0);
 			
-			FILE_LOG(logDEBUG) << "[autoDrivingToGear] timer: " << autoTimer << ", strafe correction: " << strafePIDOutput.correction
-					           << ", turn correction: " << turnPIDOutput.correction
-							   << ", drive angle: " << driveAngle << ", gyro angle: " << ahrs->GetAngle();
+			LOGGER(DEBUG) << "[autoDrivingToGear] timer: " << autoTimer << ", strafe correction: " << strafePIDOutput.correction
+					      << ", turn correction: " << turnPIDOutput.correction
+						  << ", drive angle: " << driveAngle << ", gyro angle: " << ahrs->GetAngle();
 
 			double curr_world_linear_accel_x = ahrs->GetWorldLinearAccelX();
 			double currentJerkX = curr_world_linear_accel_x - last_world_linear_accel_x;
@@ -314,7 +319,7 @@ private:
 			}
 
 		} else {
-			FILE_LOG(logDEBUG) << "[autoDrivingToGear] END";
+			LOGGER(INFO) << "[autoDrivingToGear] END";
 			autoTimer = 0;
 			autoState = kPlacingGear;
 			drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
@@ -373,11 +378,11 @@ private:
 		double pixelOffset = (count) ? m_targets[0].block.x - PIXY_IMAGE_WIDTH_PIXELS/2.0: 0.0;
 		double angleOffset = pixelOffset * (PIXY_FIELD_OF_VIEW/PIXY_IMAGE_WIDTH_PIXELS);
 
-		FILE_LOG(logDEBUG) << "gyro angle: " << driveAngle << ", offset: " << angleOffset
-				           << ", setpoint: " << turnController->GetSetpoint();
+		LOGGER(DEBUG) << "[autoDrivingToBoiler] gyro angle: " << driveAngle << ", offset: " << angleOffset
+				      << ", setpoint: " << turnController->GetSetpoint();
 
-		FILE_LOG(logDEBUG) << "autoDrivingToBoiler: width: " << m_targets[0].block.width
-					       << ", height: " << m_targets[0].block.height << ", center: " << m_targets[0].block.x;
+		LOGGER(DEBUG) << "[autoDrivingToBoiler] width: " << m_targets[0].block.width
+					  << ", height: " << m_targets[0].block.height << ", center: " << m_targets[0].block.x;
 
 		if (autoTimer < 100) {
 			// just turning
@@ -394,7 +399,8 @@ private:
 
 			// At correct distance?
 			double filtered = filter->getFilteredValue(double(m_targets[0].block.width));
-			FILE_LOG(logDEBUG) << "time: " << autoTimer << ", width: " << m_targets[0].block.width << " " << filtered;
+			LOGGER(DEBUG) << "[autoDrivingToBoiler] time: " << autoTimer << ", width: " << m_targets[0].block.width
+					      << " " << filtered;
 
 			if (filtered > kBoilerTargetWidth) {
 				drive->MecanumDrive_Cartesian(0.0, 0.0, 0.0, 0.0);
@@ -528,29 +534,29 @@ private:
 		
 		getPreferences();
 
-		FILE_LOG(logDEBUG) << "[AutoInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
-						   << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
-						   << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
-		FILE_LOG(logDEBUG) << "[AutoInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
+		LOGGER(INFO) << "[AutoInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
+				      << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
+					  << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
+		LOGGER(INFO) << "[AutoInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
 		
 		resetPIDControllers();	
 
 		autoSelected = SmartDashboard::GetString("Auto Selector", autoNameDefault);
-		FILE_LOG(logDEBUG) << "Auto selected: " << autoSelected;
+		LOGGER(INFO) << "[AutoInit] Auto selected: " << autoSelected;
 
 		if (autoSelected.find("R") != std::string::npos) {
-			FILE_LOG(logDEBUG) << "AUTO RIGHT GEAR";
+			LOGGER(INFO) << "[AutoInit] AUTO RIGHT GEAR";
 			autoDriveFowardTime = 140;
 			autoTurnToGearAngle = -60.0;
 		} else if (autoSelected.find("L") != std::string::npos){
-			FILE_LOG(logDEBUG) << "AUTO LEFT GEAR";
+			LOGGER(INFO) << "[AutoInit] AUTO LEFT GEAR";
 			autoDriveFowardTime = 140;
 			autoTurnToGearAngle = 60.0;
 		}
 		else if (autoSelected.find("N") != std::string::npos){
-			FILE_LOG(logDEBUG) << "AUTO NO GEAR";
+			LOGGER(INFO) << "[AutoInit] AUTO NO GEAR";
 		} else {
-			FILE_LOG(logDEBUG) << "AUTO RIGHT CENTER";
+			LOGGER(INFO) << "[AutoInit] AUTO RIGHT CENTER";
 			driveAngle = 0.0;
 			autoState = kDrivingToGear;
 		}
@@ -593,12 +599,12 @@ private:
 		
 		getPreferences();
 
-		FILE_LOG(logDEBUG) << "[TeleopInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
-						   << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
-						   << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
-		FILE_LOG(logDEBUG) << "[TeleopInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
+		LOGGER(INFO) << "[TeleopInit] kDriveToGearMaxTime: " << kDriveToGearMaxTime << ", ksP: " << ksP
+				     << ", ksI: " << ksI << ", ksD: " << ksD << ", kAutoSpeed: " << kAutoSpeed
+				     << ", kDrift: " << kDrift << ", kStrafeOutputRange: " << kStrafeOutputRange;
+		LOGGER(INFO) << "[TeleopInit] kP: " << kP << ", kI: " << kI << ", kD: " << kD;
 
-		FILE_LOG(logDEBUG) << "[TeleopInit] gyro angle: " << ahrs->GetAngle();
+		LOGGER(INFO) << "[TeleopInit] gyro angle: " << ahrs->GetAngle();
 		
 		resetPIDControllers();
 	}
@@ -696,10 +702,10 @@ private:
 			shooter -> SetTalonControlMode(CANTalon::kSpeedMode);
 			shooter -> Set(3700.0);
 
-			FILE_LOG(logDEBUG) << "[Launcher] speed: " << speed;
+			LOGGER(DEBUG) << "[Launcher] speed: " << speed;
 
 			if (timer == 50) {
-				FILE_LOG(logDEBUG) << "[Feeder] START";
+				LOGGER(DEBUG) << "[Feeder] START";
 
 				timer = 0;
 				feederMotor ->Set(0.7);
@@ -720,9 +726,9 @@ private:
 		}
 
 		if (isRobotCentric) {
-			FILE_LOG(logDEBUG) << "[Robot Centric] gyro angle: " << ahrs->GetAngle()
-					           << ", drive angle: " << driveAngle
-							   << ", PID correction: " << turnPIDOutput.correction;
+			LOGGER(DEBUG) << "[Robot Centric] gyro angle: " << ahrs->GetAngle()
+					      << ", drive angle: " << driveAngle
+					      << ", PID correction: " << turnPIDOutput.correction;
 			turnController->SetSetpoint(driveAngle);
 			turnController->Enable();
 
@@ -789,12 +795,12 @@ private:
 			double offz = -sin(DEG_TO_RAD*theta)*tlen;
 			offset = target_offset_inches + offz;
 
-			FILE_LOG(logDEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
-					<< ", distance: " << distance_pixy_to_target << ", pixel offset: " << pixelOffset
-					<< ", target offset: " << target_offset_inches
-					<< ", offz: " << offz
-					<< ", offset: " << offset;						
-			FILE_LOG(logDEBUG) << "gyro angle: " << ahrs->GetAngle();				
+			LOGGER(DEBUG) << "[calcTargetOffset] target width (deg): " << target_width_angle
+						  << ", distance: " << distance_pixy_to_target << ", pixel offset: " << pixelOffset
+						  << ", target offset: " << target_offset_inches
+						  << ", offz: " << offz
+						  << ", offset: " << offset;
+			LOGGER(DEBUG) << "gyro angle: " << ahrs->GetAngle();
 		}
 	}
 };
